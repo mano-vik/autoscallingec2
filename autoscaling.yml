@@ -1,0 +1,209 @@
+---
+Parameters:
+  SecurityGroupDescription:
+    Description: Security Group Description
+    Type: String
+  KeyName:
+    Description: Key Pair for EC2
+    Type: 'AWS::EC2::KeyPair::KeyName'
+
+Resources:
+  PubPrivateVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+
+  PublicSubnet1:
+     Type: 'AWS::EC2::Subnet'
+     Properties:
+       VpcId: !Ref PubPrivateVPC
+       AvailabilityZone: ap-northeast-1a
+       CidrBlock: 10.0.1.0/24
+       MapPublicIpOnLaunch: true
+
+  PublicSubnet2:
+     Type: 'AWS::EC2::Subnet'
+     Properties:
+       VpcId: !Ref PubPrivateVPC
+       AvailabilityZone: ap-northeast-1c
+       CidrBlock: 10.0.2.0/24
+       MapPublicIpOnLaunch: true
+
+  PrivateSubnet1:
+     Type: 'AWS::EC2::Subnet'
+     Properties:
+       VpcId: !Ref PubPrivateVPC
+       AvailabilityZone: ap-northeast-1a
+       CidrBlock: 10.0.3.0/24
+       MapPublicIpOnLaunch: false
+
+  PrivateSubnet2:
+     Type: 'AWS::EC2::Subnet'
+     Properties:
+       VpcId: !Ref PubPrivateVPC
+       AvailabilityZone: ap-northeast-1c
+       CidrBlock: 10.0.4.0/24
+       MapPublicIpOnLaunch: false
+
+  InternetGateway:
+     Type: 'AWS::EC2::InternetGateway'
+     Properties:
+       Tags:
+         - Key: Name
+           Value: !Join [ _, [ !Ref 'AWS::StackName' ] ]
+         - Key: Network
+           Value: Public
+
+  GatewayToInternet:
+     Type: 'AWS::EC2::VPCGatewayAttachment'
+     Properties:
+       VpcId: !Ref PubPrivateVPC
+       InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+     Type: 'AWS::EC2::RouteTable'
+     Properties:
+       VpcId: !Ref PubPrivateVPC
+       Tags:
+         - Key: Network
+           Value: Public
+
+  PublicRoute:
+     Type: 'AWS::EC2::Route'
+     DependsOn: GatewayToInternet
+     Properties:
+       RouteTableId: !Ref PublicRouteTable
+       DestinationCidrBlock: 0.0.0.0/0
+       GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+     Type: 'AWS::EC2::SubnetRouteTableAssociation'
+     Properties:
+       SubnetId: !Ref PublicSubnet1
+       RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+     Type: 'AWS::EC2::SubnetRouteTableAssociation'
+     Properties:
+       SubnetId: !Ref PublicSubnet2
+       RouteTableId: !Ref PublicRouteTable
+
+  NatGateway:
+     Type: "AWS::EC2::NatGateway"
+     DependsOn: NatPublicIP
+     Properties:
+       AllocationId: !GetAtt NatPublicIP.AllocationId
+       SubnetId: !Ref PublicSubnet1
+
+  NatPublicIP:
+     Type: "AWS::EC2::EIP"
+     DependsOn: PubPrivateVPC
+     Properties:
+       Domain: vpc
+
+  PrivateRouteTable:
+     Type: 'AWS::EC2::RouteTable'
+     Properties:
+       VpcId: !Ref PubPrivateVPC
+       Tags:
+         - Key: Network
+           Value: Private
+
+  PrivateRoute:
+     Type: 'AWS::EC2::Route'
+     Properties:
+       RouteTableId: !Ref PrivateRouteTable
+       DestinationCidrBlock: 0.0.0.0/0
+       NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+     Type: 'AWS::EC2::SubnetRouteTableAssociation'
+     Properties:
+       SubnetId: !Ref PrivateSubnet1
+       RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+     Type: 'AWS::EC2::SubnetRouteTableAssociation'
+     Properties:
+       SubnetId: !Ref PrivateSubnet2
+       RouteTableId: !Ref PrivateRouteTable
+
+
+  # security group
+  ELBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: ELB Security Group
+      VpcId: !Ref PubPrivateVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Ref SecurityGroupDescription
+      VpcId: !Ref PubPrivateVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId:
+          Fn::GetAtt:
+          - ELBSecurityGroup
+          - GroupId
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+
+  # Load Balancer for EC2
+  LoadBalancerforEC2:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Listeners:
+      - LoadBalancerPort: '80'
+        InstancePort: '80'
+        Protocol: HTTP
+      HealthCheck:
+        Target: HTTP:80/
+        HealthyThreshold: '3'
+        UnhealthyThreshold: '5'
+        Interval: '30'
+        Timeout: '5'
+      SecurityGroups:
+        - !GetAtt ELBSecurityGroup.GroupId
+  WebServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      LaunchConfigurationName: !Ref 'LaunchConfig'
+      MinSize: '2'
+      MaxSize: '3'
+      DesiredCapacity: '2'
+      LoadBalancerNames: [ !Ref 'LoadBalancerforEC2' ]
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      KeyName: !Ref 'KeyName'
+      ImageId: ami-032d6db78f84e8bf5
+      InstanceType: t3.micro
+      SecurityGroups: [ !Ref 'EC2SecurityGroup' ]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo yum update -y
+          sudo yum install wget
+          sudo amazon-linux-extras install nginx1
+          sudo systemctl start nginx
+          sudo systemctl enable nginx
+          wget https://raw.githubusercontent.com/Aspirar/hello-world/master/html/HelloWorld.html
+          sudo cp HelloWorld.html  /usr/share/nginx/html/index.html
+          sudo service nginx reload
